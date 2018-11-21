@@ -35,6 +35,7 @@ History:
 					Get/Set LTime. Thanks to Jérémy HAURAY
 					Get/Set 1500 WString. Thanks to Jérémy HAURAY
 					Get/Set 1500 Array of WChar. Thanks to Jérémy HAURAY
+ * 1.x.x 2018/11/21 Implemented ListBlocks and ListBlocksOfType (by Jos Koenis, TEB Engineering)
 
 */
 using System;
@@ -1962,7 +1963,30 @@ namespace Sharp7
 			0x41, // Block Type
 			0x30, 0x30, 0x30, 0x30, 0x30, // ASCII Block Number
 			0x41 
-		};    
+		};
+
+		// S7 List Blocks Request Header
+		byte[] S7_LIST_BLOCKS = {
+			0x03, 0x00, 0x00, 0x1d,
+			0x02, 0xf0, 0x80, 0x32,
+			0x07, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x08, 0x00,
+			0x04, 0x00, 0x01, 0x12,
+			0x04, 0x11, 0x43, 0x01, // 0x43 0x01 = ListBlocks
+			0x00, 0x0a, 0x00, 0x00,
+			0x00
+		};
+
+		// S7 List Blocks Of Type Request Header
+		byte[] S7_LIST_BLOCKS_OF_TYPE = {
+			0x03, 0x00, 0x00, 0x1f,
+			0x02, 0xf0, 0x80, 0x32,
+			0x07, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x08, 0x00,
+			0x06, 0x00, 0x01, 0x12,
+			0x04, 0x11, 0x43, 0x02, // 0x43 0x02 = ListBlocksOfType
+			0x00 // ... append ReqData
+		};
 
 		#endregion
 
@@ -1995,6 +2019,7 @@ namespace Sharp7
 		private byte[] PDU = new byte[2048];
 		private MsgSocket Socket = null;
 		private int Time_ms = 0;
+		private ushort cntword = 0;
 
 		private void CreateSocket()
 		{
@@ -2156,6 +2181,11 @@ namespace Sharp7
 		  default:
 			return S7Consts.errCliFunctionRefused;
 		  };
+		}
+
+		private ushort GetNextWord()
+		{
+			return cntword++;
 		}
 
 		#endregion
@@ -2889,7 +2919,78 @@ namespace Sharp7
 
 		public int ListBlocks(ref S7BlocksList List)
 		{
-			return S7Consts.errCliFunctionNotImplemented;
+			_LastError = 0;
+			Time_ms = 0;
+			int Elapsed = Environment.TickCount;
+
+			ushort Sequence = GetNextWord();
+
+			Array.Copy(S7_LIST_BLOCKS, 0, PDU, 0, S7_LIST_BLOCKS.Length);
+			PDU[0x0b] = (byte)(Sequence & 0xff);
+			PDU[0x0c] = (byte)(Sequence >> 8);
+
+			SendPacket(PDU, S7_LIST_BLOCKS.Length);
+
+			if (_LastError != 0) return _LastError;
+			int Length = RecvIsoPacket();
+			if (Length <= 32)// the minimum expected
+			{
+				_LastError = S7Consts.errIsoInvalidPDU;
+				return _LastError;
+			}
+
+			ushort Result = S7.GetWordAt(PDU, 27);
+			if (Result != 0)
+			{
+				_LastError = CpuError(Result);
+				return _LastError;
+			}
+
+			List = default(S7BlocksList);
+			int BlocksSize = S7.GetWordAt(PDU, 31);
+
+			if (Length <= 32 + BlocksSize)
+			{
+				_LastError = S7Consts.errIsoInvalidPDU;
+				return _LastError;
+			}
+
+			int BlocksCount = BlocksSize >> 2;
+			for (int blockNum = 0; blockNum < BlocksCount; blockNum++)
+			{
+				int Count = S7.GetWordAt(PDU, (blockNum << 2) + 35);
+
+				switch (S7.GetByteAt(PDU, (blockNum << 2) + 34)) //BlockType
+				{
+					case Block_OB:
+						List.OBCount = Count;
+						break;
+					case Block_DB:
+						List.DBCount = Count;
+						break;
+					case Block_SDB:
+						List.SDBCount = Count;
+						break;
+					case Block_FC:
+						List.FCCount = Count;
+						break;
+					case Block_SFC:
+						List.SFCCount = Count;
+						break;
+					case Block_FB:
+						List.FBCount = Count;
+						break;
+					case Block_SFB:
+						List.SFBCount = Count;
+						break;
+					default:
+						//Unknown block type. Ignore
+						break;
+				}
+			}
+
+			Time_ms = Environment.TickCount - Elapsed;
+			return _LastError; // 0
 		}
 
 		private string SiemensTimestamp(long EncodedDate)
@@ -2966,7 +3067,89 @@ namespace Sharp7
 
 		public int ListBlocksOfType(int BlockType, ushort[] List, ref int ItemsCount)
 		{
-			return S7Consts.errCliFunctionNotImplemented;
+			var First = true;
+			bool Done = false;
+			byte In_Seq = 0;
+			int Count = 0; //Block 1...n
+			int PduLength;
+			int Elapsed = Environment.TickCount;
+
+			//Consequent packets have a different ReqData
+			byte[] ReqData = new byte[] { 0xff, 0x09, 0x00, 0x02, 0x30, (byte)BlockType };
+			byte[] ReqDataContinue = new byte[] { 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00 };
+
+			_LastError = 0;
+			Time_ms = 0;
+
+			do
+			{
+				PduLength = S7_LIST_BLOCKS_OF_TYPE.Length + ReqData.Length;
+				ushort Sequence = GetNextWord();
+
+				Array.Copy(S7_LIST_BLOCKS_OF_TYPE, 0, PDU, 0, S7_LIST_BLOCKS_OF_TYPE.Length);
+				S7.SetWordAt(PDU, 0x02, (ushort)PduLength);
+				PDU[0x0b] = (byte)(Sequence & 0xff);
+				PDU[0x0c] = (byte)(Sequence >> 8);
+				if (!First)
+				{
+					S7.SetWordAt(PDU, 0x0d, 12); //ParLen
+					S7.SetWordAt(PDU, 0x0f, 4); //DataLen
+					PDU[0x14] = 8; //PLen
+					PDU[0x15] = 0x12; //Uk
+				}
+				PDU[0x17] = 0x02;
+				PDU[0x18] = In_Seq;
+				Array.Copy(ReqData, 0, PDU, 0x19, ReqData.Length);
+
+				SendPacket(PDU, PduLength);
+				if (_LastError != 0) return _LastError;
+
+				PduLength = RecvIsoPacket();
+				if (_LastError != 0) return _LastError;
+
+				if (PduLength <= 32)// the minimum expected
+				{
+					_LastError = S7Consts.errIsoInvalidPDU;
+					return _LastError;
+				}
+
+				ushort Result = S7.GetWordAt(PDU, 0x1b);
+				if (Result != 0)
+				{
+					_LastError = CpuError(Result);
+					return _LastError;
+				}
+
+				if (PDU[0x1d] != 0xFF)
+				{
+					_LastError = S7Consts.errCliItemNotAvailable;
+					return _LastError;
+				}
+
+				Done = PDU[0x1a] == 0;
+				In_Seq = PDU[0x18];
+
+				int CThis = S7.GetWordAt(PDU, 0x1f) >> 2; //Amount of blocks in this message
+				for (int c = 0; c < CThis; c++)
+				{
+					if (Count >= ItemsCount) //RoomError
+					{
+						_LastError = S7Consts.errCliPartialDataRead;
+						return _LastError;
+					}
+					List[Count++] = S7.GetWordAt(PDU, 0x21 + 4 * c);
+					Done |= Count == 0x8000; //but why?
+				}
+
+				if (First)
+				{
+					ReqData = ReqDataContinue;
+					First = false;
+				}
+			} while (_LastError == 0 && !Done);
+
+			Time_ms = Environment.TickCount - Elapsed;
+			return _LastError; // 0
 		}
 
 		#endregion
