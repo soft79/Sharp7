@@ -1,5 +1,5 @@
-﻿/*=============================================================================|
-|  PROJECT Sharp7                                                        1.0.4 |
+/*=============================================================================|
+|  PROJECT Sharp7                                                        1.0.5 |
 |==============================================================================|
 |  Copyright (C) 2016 Davide Nardella                                          |
 |  All rights reserved.                                                        |
@@ -35,7 +35,7 @@ History:
 					Get/Set LTime. Thanks to Jérémy HAURAY
 					Get/Set 1500 WString. Thanks to Jérémy HAURAY
 					Get/Set 1500 Array of WChar. Thanks to Jérémy HAURAY
- * 1.x.x 2018/11/21 Implemented ListBlocks and ListBlocksOfType (by Jos Koenis, TEB Engineering)
+ * 1.0.5 2018/11/21 Implemented ListBlocks and ListBlocksOfType (by Jos Koenis, TEB Engineering)
 
 */
 using System;
